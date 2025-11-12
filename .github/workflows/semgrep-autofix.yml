@@ -1,0 +1,94 @@
+# Semgrep autofix workflow for Unity C# scripts (drop into .github/workflows/semgrep-autofix.yml)
+name: Semgrep Autofix (Unity C#)
+
+on:
+  push:
+    paths:
+      - 'Assets/**/*.cs'
+      - '.github/semgrep/**'
+  pull_request:
+    paths:
+      - 'Assets/**/*.cs'
+      - '.github/semgrep/**'
+
+permissions:
+  contents: write
+
+jobs:
+  semgrep-autofix:
+    name: Semgrep autofix (Assets/**/*.cs)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history so we can push)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install semgrep
+        run: |
+          python -m pip install --upgrade pip
+          pip install semgrep
+
+      - name: Run semgrep (report-only)
+        id: semgrep-report
+        run: |
+          echo "Semgrep version:"
+          semgrep --version
+          echo "Running semgrep report (no changes yet)..."
+          semgrep --config .github/semgrep/unity-rules.yml --exclude-dir node_modules --include 'Assets/**/*.cs' . || true
+
+      - name: Run semgrep autofix and apply changes
+        id: semgrep-autofix
+        run: |
+          echo "Applying semgrep autofixes (only rules with safe fixes will change files)..."
+          # --include restricts fixes to Unity C# scripts under Assets
+          semgrep --config .github/semgrep/unity-rules.yml --autofix --autofix-apply-changes --exclude-dir node_modules --include 'Assets/**/*.cs' . || true
+          echo "Git status after autofix:"
+          git status --porcelain || true
+          git --no-pager diff || true
+
+      - name: Commit and push autofix changes (direct push)
+        if: steps.semgrep-autofix.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # If no changes, exit successfully
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "No autofix changes to commit."
+          else
+            git commit -m "chore(ci): apply semgrep autofixes [skip ci]" || echo "Commit failed or nothing to commit"
+            # Push back to the same branch. Note: this will fail for PRs from forks.
+            git push || (echo "Push failed (likely a forked PR). Consider using create-pull-request with a PAT." && exit 1)
+          fi
+
+      # -------------------------
+      # Alternative (recommended for repos accepting fork PRs):
+      # Create a PR instead of pushing direct. Requires a PAT stored in repo secret PUSH_TOKEN.
+      # Replace the "Commit and push" step above with the block below (uncomment and set up PUSH_TOKEN secret).
+      #
+      # - name: Create Pull Request with autofix changes
+      #   uses: peter-evans/create-pull-request@v5
+      #   with:
+      #     token: ${{ secrets.PUSH_TOKEN }}
+      #     commit-message: "chore(ci): apply semgrep autofixes"
+      #     title: "semgrep autofixes"
+      #     body: "This PR contains automated autofixes suggested by semgrep."
+      #     branch: "semgrep/autofix-${{ github.run_id }}"
+      #
+      # This approach works with forked PRs because the PAT (PUSH_TOKEN) has repo permissions.
+      # -------------------------
+
+      - name: Upload semgrep output (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-output
+          path: |
+            # capture semgrep output (if any produced)
+            semgrep-report.txt || true
